@@ -37,6 +37,27 @@ class TransactionService
 
             $ai = app(CahshieMateAIService::class);
             $result = $ai->analyzeMessage($message);
+
+            $specificMonth = $this->detectSpecificMonth($message);
+
+            if ($specificMonth) {
+                $result['period'] = 'custom';
+                $result['start_date'] = $specificMonth['start_date'];
+                $result['end_date'] = $specificMonth['end_date'];
+            }
+
+            if ($this->isCategorySummaryRequest($message)) {
+                $category = $this->detectCategoryFromMessage($message);
+
+                if ($category) {
+                    $result['intent'] = 'category_summary';
+                    $result['type'] = 'expense';
+                    $result['category'] = $category;
+                    $result['amount'] = null;
+                    $result['breakdown'] = false;
+                }
+            }
+
             $intent = $result['intent'] ?? null;
 
             if ($intent === 'record_transaction') {
@@ -49,6 +70,14 @@ class TransactionService
 
             if ($intent === 'financial_summary') {
                 return $this->financialSummary(
+                    $user,
+                    $message,
+                    $result
+                );
+            }
+
+            if ($intent === 'category_summary') {
+                return $this->categorySummary(
                     $user,
                     $message,
                     $result
@@ -93,16 +122,19 @@ class TransactionService
             );
         }
 
-        if (!is_numeric($amount) || $amount <= 0) {
-            throw new RuntimeException(
-                'Nominal transaksi tidak valid.'
-            );
+        if ($amount === null || !is_numeric($amount) || $amount <= 0) {
+            return [
+                'intent' => 'record_transaction',
+                'user_id' => $user->id,
+                'type' => $type,
+                'amount' => null,
+                'category' => $categoryName,
+                'description' => $description,
+            ];
         }
 
         if (empty($categoryName)) {
-            throw new RuntimeException(
-                'Kategori transaksi tidak ditemukan.'
-            );
+            $categoryName = 'Lainnya';
         }
 
         if (empty($description)) {
@@ -169,6 +201,13 @@ class TransactionService
         string $message,
         array $result
     ): array {
+        $isBreakdown = $this->isBreakdownRequest($message);
+
+        if ($isBreakdown) {
+            $result['breakdown'] = true;
+            $result['type'] = 'expense';
+        }
+
         [$startDate, $endDate] = $this->getPeriodDates($result);
 
         $income = DB::table('transactions')
@@ -191,31 +230,130 @@ class TransactionService
 
         $balance = $income - $expense;
 
+        $breakdownData = [];
+
+        if (($result['breakdown'] ?? false) === true) {
+            $breakdownData = DB::table('transactions')
+                ->join(
+                    'categories',
+                    'transactions.category_id',
+                    '=',
+                    'categories.id'
+                )
+                ->where('transactions.user_id', $user->id)
+                ->where('transactions.type', 'expense')
+                ->whereBetween(
+                    'transactions.transaction_date',
+                    [$startDate, $endDate]
+                )
+                ->select(
+                    'categories.name as category',
+                    DB::raw(
+                        'SUM(transactions.amount) as amount'
+                    )
+                )
+                ->groupBy(
+                    'categories.id',
+                    'categories.name'
+                )
+                ->orderByDesc('amount')
+                ->get()
+                ->map(function ($item) {
+                    return [
+                        'category' => $item->category,
+                        'amount' => (int) $item->amount,
+                    ];
+                })
+                ->values()
+                ->toArray();
+        }
+
         $periodData = $this->getPeriodData($result);
+
+        $response = [
+            'intent' => 'financial_summary',
+            'income' => (int) $income,
+            'expense' => (int) $expense,
+            'balance' => (int) $balance,
+            'breakdown' => ($result['breakdown'] ?? false) === true,
+            'breakdown_data' => $breakdownData,
+            ...$periodData,
+        ];
 
         DB::table('ai_interactions')->insert([
             'user_id' => $user->id,
             'input_text' => $message,
-            'ai_response' => json_encode([
-                'intent' => 'financial_summary',
-                ...$periodData,
-                'income' => (int) $income,
-                'expense' => (int) $expense,
-                'balance' => (int) $balance,
-            ], JSON_UNESCAPED_UNICODE),
+            'ai_response' => json_encode(
+                $response,
+                JSON_UNESCAPED_UNICODE
+            ),
             'status' => 'success',
             'error_message' => null,
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
-        return [
-            'intent' => 'financial_summary',
-            'income' => (int) $income,
-            'expense' => (int) $expense,
-            'balance' => (int) $balance,
+        return $response;
+    }
+
+    private function categorySummary(
+        object $user,
+        string $message,
+        array $result
+    ): array {
+        [$startDate, $endDate] = $this->getPeriodDates($result);
+
+        $categoryName = $result['category'] ?? null;
+
+        $query = DB::table('transactions')
+            ->join(
+                'categories',
+                'transactions.category_id',
+                '=',
+                'categories.id'
+            )
+            ->where('transactions.user_id', $user->id)
+            ->where('transactions.type', 'expense')
+            ->whereBetween(
+                'transactions.transaction_date',
+                [$startDate, $endDate]
+            );
+
+        if (!empty($categoryName)) {
+            $query->where(
+                'categories.name',
+                $categoryName
+            );
+        }
+
+        $totalExpense = (int) $query->sum(
+            'transactions.amount'
+        );
+
+        $periodData = $this->getPeriodData($result);
+
+        $response = [
+            'intent' => 'category_summary',
+            'category' => $categoryName,
+            'expense' => $totalExpense,
+            'total' => $totalExpense,
             ...$periodData,
         ];
+
+        DB::table('ai_interactions')->insert([
+            'user_id' => $user->id,
+            'input_text' => $message,
+            'ai_response' => json_encode(
+                $response,
+                JSON_UNESCAPED_UNICODE
+            ),
+            'status' => 'success',
+            'error_message' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return $response;
     }
 
     private function balance(
@@ -247,136 +385,28 @@ class TransactionService
 
         $periodData = $this->getPeriodData($result);
 
-        DB::table('ai_interactions')->insert([
-            'user_id' => $user->id,
-            'input_text' => $message,
-            'ai_response' => json_encode([
-                'intent' => 'balance',
-                ...$periodData,
-                'income' => (int) $income,
-                'expense' => (int) $expense,
-                'balance' => (int) $balance,
-            ], JSON_UNESCAPED_UNICODE),
-            'status' => 'success',
-            'error_message' => null,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-
-        return [
+        $response = [
             'intent' => 'balance',
             'income' => (int) $income,
             'expense' => (int) $expense,
             'balance' => (int) $balance,
             ...$periodData,
         ];
-    }
 
-    private function getPeriodData(array $result): array
-    {
-        return [
-            'period_type' => $result['period_type'] ?? 'current',
-            'period_value' => max(
-                1,
-                (int) ($result['period_value'] ?? 1)
+        DB::table('ai_interactions')->insert([
+            'user_id' => $user->id,
+            'input_text' => $message,
+            'ai_response' => json_encode(
+                $response,
+                JSON_UNESCAPED_UNICODE
             ),
-            'period_unit' => $result['period_unit'] ?? 'month',
-            'specific_month' => (int) ($result['specific_month'] ?? 0),
-            'specific_year' => (int) ($result['specific_year'] ?? 0),
-        ];
-    }
+            'status' => 'success',
+            'error_message' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
 
-    private function getPeriodDates(array $result): array
-    {
-        $periodType = $result['period_type'] ?? 'current';
-        $periodValue = max(
-            1,
-            (int) ($result['period_value'] ?? 1)
-        );
-        $periodUnit = $result['period_unit'] ?? 'month';
-        $specificMonth = (int) ($result['specific_month'] ?? 0);
-        $specificYear = (int) ($result['specific_year'] ?? 0);
-
-        if ($periodType === 'current') {
-            if ($periodUnit === 'day') {
-                return [
-                    now()->startOfDay()->toDateString(),
-                    now()->endOfDay()->toDateString(),
-                ];
-            }
-
-            if ($periodUnit === 'year') {
-                return [
-                    now()->startOfYear()->toDateString(),
-                    now()->endOfYear()->toDateString(),
-                ];
-            }
-
-            return [
-                now()->startOfMonth()->toDateString(),
-                now()->endOfMonth()->toDateString(),
-            ];
-        }
-
-        if ($periodType === 'relative') {
-            if ($periodUnit === 'day') {
-                $date = now()->subDays($periodValue);
-
-                return [
-                    $date->copy()->startOfDay()->toDateString(),
-                    $date->copy()->endOfDay()->toDateString(),
-                ];
-            }
-
-            if ($periodUnit === 'year') {
-                $date = now()->subYears($periodValue);
-
-                return [
-                    $date->copy()->startOfYear()->toDateString(),
-                    $date->copy()->endOfYear()->toDateString(),
-                ];
-            }
-
-            $date = now()->subMonths($periodValue);
-
-            return [
-                $date->copy()->startOfMonth()->toDateString(),
-                $date->copy()->endOfMonth()->toDateString(),
-            ];
-        }
-
-        if ($periodType === 'specific') {
-            if ($specificYear < 2000) {
-                $specificYear = now()->year;
-            }
-
-            if ($specificMonth >= 1 && $specificMonth <= 12) {
-                $date = now()
-                    ->setYear($specificYear)
-                    ->setMonth($specificMonth);
-
-                return [
-                    $date->copy()->startOfMonth()->toDateString(),
-                    $date->copy()->endOfMonth()->toDateString(),
-                ];
-            }
-
-            $date = now()->setYear($specificYear);
-
-            return [
-                $date->copy()->startOfYear()->toDateString(),
-                $date->copy()->endOfYear()->toDateString(),
-            ];
-        }
-
-        if ($periodType === 'all_time') {
-            return [
-                '0000-01-01',
-                '9999-12-31',
-            ];
-        }
-
-        throw new RuntimeException('Periode tidak valid.');
+        return $response;
     }
 
     private function resetTransactions(
@@ -384,144 +414,309 @@ class TransactionService
         string $message,
         array $result
     ): array {
-        $query = DB::table('transactions')
-            ->where('user_id', $user->id);
+        [$startDate, $endDate] = $this->getPeriodDates($result);
 
-        $periodType = $result['period_type'] ?? 'current';
-        $periodValue = max(
-            1,
-            (int) ($result['period_value'] ?? 1)
-        );
-        $periodUnit = $result['period_unit'] ?? 'month';
-        $specificMonth = (int) ($result['specific_month'] ?? 0);
-        $specificYear = (int) ($result['specific_year'] ?? 0);
+        $deleted = DB::table('transactions')
+            ->where('user_id', $user->id)
+            ->whereBetween(
+                'transaction_date',
+                [$startDate, $endDate]
+            )
+            ->delete();
 
-        if ($periodType === 'current') {
-            if ($periodUnit === 'day') {
-                $date = now()
-                    ->subDays($periodValue - 1);
+        $periodData = $this->getPeriodData($result);
 
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfDay()->toDateString(),
-                        now()->endOfDay()->toDateString(),
-                    ]
-                );
-            } elseif ($periodUnit === 'month') {
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        now()->startOfMonth()->toDateString(),
-                        now()->endOfMonth()->toDateString(),
-                    ]
-                );
-            } elseif ($periodUnit === 'year') {
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        now()->startOfYear()->toDateString(),
-                        now()->endOfYear()->toDateString(),
-                    ]
-                );
-            }
-        } elseif ($periodType === 'relative') {
-            if ($periodUnit === 'day') {
-                $date = now()->subDays($periodValue);
-
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfDay()->toDateString(),
-                        $date->copy()->endOfDay()->toDateString(),
-                    ]
-                );
-            } elseif ($periodUnit === 'month') {
-                $date = now()->subMonths($periodValue);
-
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfMonth()->toDateString(),
-                        $date->copy()->endOfMonth()->toDateString(),
-                    ]
-                );
-            } elseif ($periodUnit === 'year') {
-                $date = now()->subYears($periodValue);
-
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfYear()->toDateString(),
-                        $date->copy()->endOfYear()->toDateString(),
-                    ]
-                );
-            }
-        } elseif ($periodType === 'specific') {
-            if ($specificYear < 2000) {
-                throw new RuntimeException(
-                    'Tahun reset tidak valid.'
-                );
-            }
-
-            if ($specificMonth >= 1 && $specificMonth <= 12) {
-                $date = now()
-                    ->setYear($specificYear)
-                    ->setMonth($specificMonth);
-
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfMonth()->toDateString(),
-                        $date->copy()->endOfMonth()->toDateString(),
-                    ]
-                );
-            } else {
-                $date = now()->setYear($specificYear);
-
-                $query->whereBetween(
-                    'transaction_date',
-                    [
-                        $date->copy()->startOfYear()->toDateString(),
-                        $date->copy()->endOfYear()->toDateString(),
-                    ]
-                );
-            }
-        } elseif ($periodType !== 'all_time') {
-            throw new RuntimeException(
-                'Periode reset tidak valid.'
-            );
-        }
-
-        $deleted = $query->delete();
+        $response = [
+            'intent' => 'reset_transactions',
+            'deleted' => $deleted,
+            ...$periodData,
+        ];
 
         DB::table('ai_interactions')->insert([
             'user_id' => $user->id,
             'input_text' => $message,
-            'ai_response' => json_encode([
-                'intent' => 'reset_transactions',
-                'period_type' => $periodType,
-                'period_value' => $periodValue,
-                'period_unit' => $periodUnit,
-                'specific_month' => $specificMonth,
-                'specific_year' => $specificYear,
-                'deleted' => $deleted,
-            ], JSON_UNESCAPED_UNICODE),
+            'ai_response' => json_encode(
+                $response,
+                JSON_UNESCAPED_UNICODE
+            ),
             'status' => 'success',
             'error_message' => null,
             'created_at' => now(),
             'updated_at' => now(),
         ]);
 
+        return $response;
+    }
+
+    private function isCategorySummaryRequest(string $message): bool
+    {
+        $message = mb_strtolower(trim($message));
+
+        $patterns = [
+            'berapa pengeluaran',
+            'pengeluaran saya berapa',
+            'pengeluaran aku berapa',
+            'pengeluaran ku berapa',
+            'habis berapa untuk',
+            'habis berapa buat',
+            'total pengeluaran untuk',
+            'total pengeluaran buat',
+            'jumlah pengeluaran untuk',
+            'jumlah pengeluaran buat',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (str_contains($message, $pattern)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function detectCategoryFromMessage(string $message): ?string
+    {
+        $message = mb_strtolower(trim($message));
+
+        $categories = DB::table('categories')
+            ->where('type', 'expense')
+            ->pluck('name')
+            ->toArray();
+
+        foreach ($categories as $category) {
+            if (str_contains(
+                $message,
+                mb_strtolower($category)
+            )) {
+                return $category;
+            }
+        }
+
+        $aliases = [
+            'makan' => 'Makanan & Minuman',
+            'makanan' => 'Makanan & Minuman',
+            'minum' => 'Makanan & Minuman',
+            'minuman' => 'Makanan & Minuman',
+            'transport' => 'Transportasi',
+            'bensin' => 'Transportasi',
+            'shopping' => 'Belanja',
+            'listrik' => 'Tagihan',
+            'hiburan' => 'Hiburan',
+            'game' => 'Hiburan',
+            'gaming' => 'Hiburan',
+            'film' => 'Hiburan',
+            'nonton' => 'Hiburan',
+            'obat' => 'Kesehatan',
+            'baju' => 'Fashion',
+            'pakaian' => 'Fashion',
+            'kuliah' => 'Pendidikan',
+        ];
+
+        foreach ($aliases as $keyword => $category) {
+            if (str_contains($message, $keyword)) {
+                return $category;
+            }
+        }
+
+        return null;
+    }
+
+    private function detectSpecificMonth(
+        string $message
+    ): ?array {
+        $message = mb_strtolower(trim($message));
+
+        $months = [
+            'januari' => 1,
+            'februari' => 2,
+            'maret' => 3,
+            'april' => 4,
+            'mei' => 5,
+            'juni' => 6,
+            'juli' => 7,
+            'agustus' => 8,
+            'september' => 9,
+            'oktober' => 10,
+            'november' => 11,
+            'desember' => 12,
+        ];
+
+        foreach ($months as $monthName => $monthNumber) {
+            $pattern = '/\b' . $monthName . '\s+(\d{4})\b/u';
+
+            if (preg_match($pattern, $message, $matches)) {
+                $year = (int) $matches[1];
+
+                if ($year < 1900 || $year > 2999) {
+                    return null;
+                }
+
+                $startDate = sprintf(
+                    '%04d-%02d-01',
+                    $year,
+                    $monthNumber
+                );
+
+                $endDate = date(
+                    'Y-m-t',
+                    strtotime($startDate)
+                );
+
+                return [
+                    'start_date' => $startDate,
+                    'end_date' => $endDate,
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    private function isBreakdownRequest(string $message): bool
+    {
+        $message = mb_strtolower(
+            trim($message)
+        );
+
+        $patterns = [
+            'habis buat apa',
+            'habis untuk apa',
+            'uangku buat apa',
+            'uang ku buat apa',
+            'uangku untuk apa',
+            'uang ku untuk apa',
+            'pengeluaran buat apa',
+            'pengeluaran untuk apa',
+            'pengeluaran apa saja',
+            'pengeluaran apa aja',
+            'buat apa aja',
+            'buat apa saja',
+            'untuk apa aja',
+            'untuk apa saja',
+            'rekap pengeluaran',
+            'ringkas pengeluaran',
+            'rincian pengeluaran',
+            'detail pengeluaran',
+            'pengeluaran berdasarkan kategori',
+            'rincian berdasarkan kategori',
+            'rekap berdasarkan kategori',
+            'pengeluaran per kategori',
+            'tampilkan pengeluaran per kategori',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (str_contains($message, $pattern)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function getPeriodData(array $result): array
+    {
         return [
-            'intent' => 'reset_transactions',
-            'deleted' => $deleted,
-            'period_type' => $periodType,
-            'period_value' => $periodValue,
-            'period_unit' => $periodUnit,
-            'specific_month' => $specificMonth,
-            'specific_year' => $specificYear,
+            'period' => $result['period'] ?? 'this_month',
+            'start_date' => $result['start_date'] ?? null,
+            'end_date' => $result['end_date'] ?? null,
         ];
     }
-}
 
+    private function getPeriodDates(array $result): array
+    {
+        $period = $result['period'] ?? 'this_month';
+
+        if ($period === 'custom') {
+            $startDate = $result['start_date'] ?? null;
+            $endDate = $result['end_date'] ?? null;
+
+            if (!$startDate || !$endDate) {
+                throw new RuntimeException(
+                    'Rentang tanggal tidak lengkap.'
+                );
+            }
+
+            return [$startDate, $endDate];
+        }
+
+        return match ($period) {
+            'today' => [
+                now()->startOfDay()->toDateString(),
+                now()->endOfDay()->toDateString(),
+            ],
+
+            'yesterday' => [
+                now()
+                    ->copy()
+                    ->subDay()
+                    ->startOfDay()
+                    ->toDateString(),
+                now()
+                    ->copy()
+                    ->subDay()
+                    ->endOfDay()
+                    ->toDateString(),
+            ],
+
+            'this_week' => [
+                now()->startOfWeek()->toDateString(),
+                now()->endOfWeek()->toDateString(),
+            ],
+
+            'last_week' => [
+                now()
+                    ->copy()
+                    ->subWeek()
+                    ->startOfWeek()
+                    ->toDateString(),
+                now()
+                    ->copy()
+                    ->subWeek()
+                    ->endOfWeek()
+                    ->toDateString(),
+            ],
+
+            'this_month' => [
+                now()->startOfMonth()->toDateString(),
+                now()->endOfMonth()->toDateString(),
+            ],
+
+            'last_month' => [
+                now()
+                    ->copy()
+                    ->subMonth()
+                    ->startOfMonth()
+                    ->toDateString(),
+                now()
+                    ->copy()
+                    ->subMonth()
+                    ->endOfMonth()
+                    ->toDateString(),
+            ],
+
+            'this_year' => [
+                now()->startOfYear()->toDateString(),
+                now()->endOfYear()->toDateString(),
+            ],
+
+            'last_30_days' => [
+                now()
+                    ->copy()
+                    ->subDays(29)
+                    ->startOfDay()
+                    ->toDateString(),
+                now()->endOfDay()->toDateString(),
+            ],
+
+            'all_time' => [
+                '1900-01-01',
+                '2999-12-31',
+            ],
+
+            default => [
+                now()->startOfMonth()->toDateString(),
+                now()->endOfMonth()->toDateString(),
+            ],
+        };
+    }
+}

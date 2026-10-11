@@ -22,6 +22,8 @@ class CahshieMateWebhookHandler extends WebhookHandler
                 "• Bayar listrik 300 ribu\n\n" .
                 "<b>Cek keuangan:</b>\n" .
                 "• Berapa pengeluaran saya bulan ini?\n" .
+                "• Pengeluaran buat hiburan berapa?\n" .
+                "• Bulan ini uangku habis buat apa aja?\n" .
                 "• Berapa pemasukan saya bulan ini?\n" .
                 "• Saldo saya berapa?\n\n" .
                 "Kirim pesan dan saya akan membantu mengelolanya 🤖"
@@ -54,151 +56,30 @@ class CahshieMateWebhookHandler extends WebhookHandler
                 $text
             );
 
-            if (($result['intent'] ?? null) === 'record_transaction') {
-                $typeLabel = $result['type'] === 'income'
-                    ? 'Pemasukan'
-                    : 'Pengeluaran';
+            $intent = $result['intent'] ?? null;
 
-                $emoji = $result['type'] === 'income'
-                    ? '💰'
-                    : '💸';
-
-                $amount = number_format(
-                    $result['amount'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $category = e(
-                    $result['category'] ?? 'Lainnya'
-                );
-
-                $description = e(
-                    $result['description'] ?? '-'
-                );
-
-                $this->chat
-                    ->html(
-                        "✅ <b>Transaksi berhasil dicatat!</b>\n\n" .
-                        "{$emoji} <b>{$typeLabel}</b>\n" .
-                        "💵 Jumlah: <b>Rp{$amount}</b>\n" .
-                        "📂 Kategori: {$category}\n" .
-                        "📝 Deskripsi: {$description}\n\n" .
-                        "📅 " . now()->format('d/m/Y')
-                    )
-                    ->send();
-
+            if ($intent === 'record_transaction') {
+                $this->handleRecordTransaction($result);
                 return;
             }
 
-            if (($result['intent'] ?? null) === 'financial_summary') {
-                $income = number_format(
-                    $result['income'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $expense = number_format(
-                    $result['expense'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $balance = number_format(
-                    $result['balance'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $periodLabel = e(
-                    $this->getPeriodLabel($result)
-                );
-
-                $this->chat
-                    ->html(
-                        "📊 <b>Ringkasan Keuangan {$periodLabel}</b>\n\n" .
-                        "💰 Total Pemasukan: <b>Rp{$income}</b>\n" .
-                        "💸 Total Pengeluaran: <b>Rp{$expense}</b>\n\n" .
-                        "💵 <b>Uang Tersisa: Rp{$balance}</b>"
-                    )
-                    ->send();
-
+            if ($intent === 'financial_summary') {
+                $this->handleFinancialSummary($result);
                 return;
             }
 
-            if (($result['intent'] ?? null) === 'balance') {
-                $income = number_format(
-                    $result['income'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $expense = number_format(
-                    $result['expense'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $balance = number_format(
-                    $result['balance'] ?? 0,
-                    0,
-                    ',',
-                    '.'
-                );
-
-                $periodLabel = e(
-                    $this->getPeriodLabel($result)
-                );
-
-                $this->chat
-                    ->html(
-                        "💵 <b>Saldo Keuangan {$periodLabel}</b>\n\n" .
-                        "💰 Total Pemasukan: <b>Rp{$income}</b>\n" .
-                        "💸 Total Pengeluaran: <b>Rp{$expense}</b>\n\n" .
-                        "💵 <b>Uang Tersisa: Rp{$balance}</b>"
-                    )
-                    ->send();
-
+            if ($intent === 'category_summary') {
+                $this->handleCategorySummary($result);
                 return;
             }
 
-            if (($result['intent'] ?? null) === 'reset_transactions') {
-                $deleted = (int) ($result['deleted'] ?? 0);
-                $periodLabel = e(
-                    $this->getPeriodLabel($result)
-                );
+            if ($intent === 'balance') {
+                $this->handleBalance($result);
+                return;
+            }
 
-                if ($deleted > 0) {
-                    $transactionText = $deleted === 1
-                        ? '1 transaksi'
-                        : "{$deleted} transaksi";
-
-                    $this->chat
-                        ->html(
-                            "🗑️ <b>Transaksi berhasil direset!</b>\n\n" .
-                            "📅 Periode: <b>{$periodLabel}</b>\n" .
-                            "Sebanyak <b>{$transactionText}</b> telah dihapus dari catatan keuanganmu. 💰\n\n" .
-                            "✨ Catatan transaksi pada periode tersebut sudah bersih."
-                        )
-                        ->send();
-
-                    return;
-                }
-
-                $this->chat
-                    ->html(
-                        "✨ <b>Tidak ada transaksi yang perlu direset.</b>\n\n" .
-                        "📅 Periode: <b>{$periodLabel}</b>\n" .
-                        "Tidak ditemukan transaksi pada periode yang kamu minta."
-                    )
-                    ->send();
-
+            if ($intent === 'reset_transactions') {
+                $this->handleResetTransactions($result);
                 return;
             }
 
@@ -209,12 +90,11 @@ class CahshieMateWebhookHandler extends WebhookHandler
                     "• Tadi makan 25 ribu\n" .
                     "• Gaji masuk 4 juta\n" .
                     "• Berapa pengeluaran saya bulan ini?\n" .
-                    "• Berapa pemasukan saya bulan ini?\n" .
-                    "• Saldo saya berapa?\n" .
-                    "• Reset transaksi"
+                    "• Pengeluaran buat hiburan berapa?\n" .
+                    "• Bulan ini uangku habis buat apa aja?\n" .
+                    "• Saldo saya berapa?"
                 )
                 ->send();
-
         } catch (Throwable $e) {
             report($e);
 
@@ -234,93 +114,331 @@ class CahshieMateWebhookHandler extends WebhookHandler
         }
     }
 
+    private function handleRecordTransaction(array $result): void
+    {
+        $type = $result['type'] ?? 'expense';
+        $amount = $result['amount'] ?? null;
+
+        if ($amount === null || $amount <= 0) {
+            $category = e(
+                $result['category'] ?? 'Lainnya'
+            );
+
+            $typeText = $type === 'income'
+                ? 'pemasukan'
+                : 'pengeluaran';
+
+            $this->chat
+                ->html(
+                    "💬 <b>Oke!</b>\n\n" .
+                    "Kamu ingin mencatat {$typeText}" .
+                    " untuk kategori <b>{$category}</b>.\n\n" .
+                    "💵 Nominalnya berapa?"
+                )
+                ->send();
+
+            return;
+        }
+
+        $typeLabel = $type === 'income'
+            ? 'Pemasukan'
+            : 'Pengeluaran';
+
+        $emoji = $type === 'income'
+            ? '💰'
+            : '💸';
+
+        $formattedAmount = number_format(
+            $amount,
+            0,
+            ',',
+            '.'
+        );
+
+        $category = e(
+            $result['category'] ?? 'Lainnya'
+        );
+
+        $description = e(
+            $result['description'] ?? '-'
+        );
+
+        $this->chat
+            ->html(
+                "✅ <b>Transaksi berhasil dicatat!</b>\n\n" .
+                "{$emoji} <b>{$typeLabel}</b>\n" .
+                "💵 Jumlah: <b>Rp{$formattedAmount}</b>\n" .
+                "📂 Kategori: {$category}\n" .
+                "📝 Deskripsi: {$description}\n\n" .
+                "📅 " . now()->format('d/m/Y')
+            )
+            ->send();
+    }
+
+    private function handleFinancialSummary(array $result): void
+    {
+        $periodLabel = e(
+            $this->getPeriodLabel($result)
+        );
+
+        $breakdown = (bool) (
+            $result['breakdown'] ?? false
+        );
+
+        if ($breakdown) {
+            $this->sendBreakdownSummary(
+                $result,
+                $periodLabel
+            );
+
+            return;
+        }
+
+        $income = number_format(
+            $result['income'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $expense = number_format(
+            $result['expense'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $balance = number_format(
+            $result['balance'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $this->chat
+            ->html(
+                "📊 <b>Ringkasan Keuangan</b>\n" .
+                "📅 {$periodLabel}\n\n" .
+                "💰 Total Pemasukan: <b>Rp{$income}</b>\n" .
+                "💸 Total Pengeluaran: <b>Rp{$expense}</b>\n\n" .
+                "💵 <b>Uang Tersisa: Rp{$balance}</b>"
+            )
+            ->send();
+    }
+
+    private function handleCategorySummary(array $result): void
+    {
+        $category = $result['category'] ?? null;
+
+        if (!$category) {
+            $this->chat
+                ->html(
+                    "🤔 <b>Kategori pengeluaran belum diketahui.</b>\n\n" .
+                    "Coba tanyakan seperti:\n" .
+                    "• Pengeluaran buat hiburan berapa?\n" .
+                    "• Aku habis berapa buat makan?\n" .
+                    "• Total belanja bulan ini berapa?"
+                )
+                ->send();
+
+            return;
+        }
+
+        $amount = number_format(
+            $result['expense'] ?? $result['total'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $periodLabel = e(
+            $this->getPeriodLabel($result)
+        );
+
+        $categoryLabel = e($category);
+
+        $this->chat
+            ->html(
+                "📂 <b>Pengeluaran {$categoryLabel}</b>\n" .
+                "📅 {$periodLabel}\n\n" .
+                "💸 Total: <b>Rp{$amount}</b>"
+            )
+            ->send();
+    }
+
+    private function handleBalance(array $result): void
+    {
+        $income = number_format(
+            $result['income'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $expense = number_format(
+            $result['expense'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $balance = number_format(
+            $result['balance'] ?? 0,
+            0,
+            ',',
+            '.'
+        );
+
+        $periodLabel = e(
+            $this->getPeriodLabel($result)
+        );
+
+        $this->chat
+            ->html(
+                "💵 <b>Saldo Keuangan</b>\n" .
+                "📅 {$periodLabel}\n\n" .
+                "💰 Total Pemasukan: <b>Rp{$income}</b>\n" .
+                "💸 Total Pengeluaran: <b>Rp{$expense}</b>\n\n" .
+                "💵 <b>Uang Tersisa: Rp{$balance}</b>"
+            )
+            ->send();
+    }
+
+    private function handleResetTransactions(array $result): void
+    {
+        $deleted = (int) ($result['deleted'] ?? 0);
+
+        $periodLabel = e(
+            $this->getPeriodLabel($result)
+        );
+
+        $this->chat
+            ->html(
+                "🗑️ <b>Reset Keuangan Berhasil</b>\n" .
+                "📅 {$periodLabel}\n\n" .
+                "✅ {$deleted} transaksi berhasil dihapus."
+            )
+            ->send();
+    }
+
+    private function sendBreakdownSummary(
+        array $result,
+        string $periodLabel
+    ): void {
+        $breakdown = $result['breakdown_data'] ?? [];
+
+        if (empty($breakdown)) {
+            $this->chat
+                ->html(
+                    "📊 <b>Ringkasan Pengeluaran</b>\n" .
+                    "📅 {$periodLabel}\n\n" .
+                    "✨ Belum ada pengeluaran pada periode tersebut."
+                )
+                ->send();
+
+            return;
+        }
+
+        $message =
+            "📊 <b>Ringkasan Pengeluaran</b>\n" .
+            "📅 {$periodLabel}\n\n";
+
+        $total = 0;
+
+        foreach ($breakdown as $item) {
+            $category = e(
+                $item['category'] ?? 'Lainnya'
+            );
+
+            $amount = (int) (
+                $item['amount'] ?? 0
+            );
+
+            $total += $amount;
+
+            $emoji = $this->getCategoryEmoji(
+                $item['category'] ?? 'Lainnya'
+            );
+
+            $formattedAmount = number_format(
+                $amount,
+                0,
+                ',',
+                '.'
+            );
+
+            $message .=
+                "{$emoji} <b>{$category}</b>\n" .
+                "Rp{$formattedAmount}\n\n";
+        }
+
+        $formattedTotal = number_format(
+            $total,
+            0,
+            ',',
+            '.'
+        );
+
+        $message .=
+            "━━━━━━━━━━━━━━━━\n" .
+            "💸 <b>Total</b>\n" .
+            "<b>Rp{$formattedTotal}</b>";
+
+        $this->chat
+            ->html($message)
+            ->send();
+    }
+
+    private function getCategoryEmoji(string $category): string
+    {
+        return match ($category) {
+            'Makanan & Minuman' => '🍔',
+            'Fashion' => '👕',
+            'Transportasi' => '🚗',
+            'Belanja' => '🛍️',
+            'Tagihan' => '💡',
+            'Kesehatan' => '🏥',
+            'Hiburan' => '🎮',
+            'Pendidikan' => '📚',
+            'Gaji' => '💼',
+            'Bonus' => '🎁',
+            'Usaha' => '💻',
+            default => '📌',
+        };
+    }
+
     private function getPeriodLabel(array $result): string
     {
-        $periodType = $result['period_type'] ?? 'current';
-        $periodUnit = $result['period_unit'] ?? 'month';
-        $periodValue = max(
-            1,
-            (int) ($result['period_value'] ?? 1)
-        );
+        $period = $result['period'] ?? 'this_month';
 
-        $specificMonth = (int) (
-            $result['specific_month'] ?? 0
-        );
+        $startDate = $result['start_date'] ?? null;
+        $endDate = $result['end_date'] ?? null;
 
-        $specificYear = (int) (
-            $result['specific_year'] ?? 0
-        );
-
-        $months = [
-            1 => 'Januari',
-            2 => 'Februari',
-            3 => 'Maret',
-            4 => 'April',
-            5 => 'Mei',
-            6 => 'Juni',
-            7 => 'Juli',
-            8 => 'Agustus',
-            9 => 'September',
-            10 => 'Oktober',
-            11 => 'November',
-            12 => 'Desember',
-        ];
-
-        if ($periodType === 'specific') {
-            if (
-                $specificMonth >= 1 &&
-                $specificMonth <= 12
-            ) {
-                $year = $specificYear >= 2000
-                    ? $specificYear
-                    : now()->year;
-
-                return $months[$specificMonth] . ' ' . $year;
-            }
-
-            $year = $specificYear >= 2000
-                ? $specificYear
-                : now()->year;
-
-            return 'Tahun ' . $year;
+        if (
+            $period === 'custom' &&
+            $startDate &&
+            $endDate
+        ) {
+            return date('d/m/Y', strtotime($startDate)) .
+                ' - ' .
+                date('d/m/Y', strtotime($endDate));
         }
 
-        if ($periodType === 'relative') {
-            if ($periodUnit === 'day') {
-                if ($periodValue === 1) {
-                    return 'Kemarin';
-                }
-
-                return $periodValue . ' Hari Lalu';
-            }
-
-            if ($periodUnit === 'year') {
-                return 'Tahun ' .
-                    (now()->year - $periodValue);
-            }
-
-            $date = now()->subMonths($periodValue);
-
-            return $months[$date->month] . ' ' . $date->year;
-        }
-
-        if ($periodType === 'current') {
-            if ($periodUnit === 'day') {
-                return 'Hari Ini';
-            }
-
-            if ($periodUnit === 'year') {
-                return 'Tahun ' . now()->year;
-            }
-
-            return $months[now()->month] . ' ' . now()->year;
-        }
-
-        if ($periodType === 'all_time') {
-            return 'Semua Waktu';
-        }
-
-        return 'Periode yang Dipilih';
+        return match ($period) {
+            'today' => 'Hari Ini',
+            'yesterday' => 'Kemarin',
+            'this_week' => 'Minggu Ini',
+            'last_week' => 'Minggu Lalu',
+            'this_month' => now()->translatedFormat('F Y'),
+            'last_month' => now()
+                ->copy()
+                ->subMonth()
+                ->translatedFormat('F Y'),
+            'this_year' => 'Tahun ' . now()->year,
+            'last_30_days' => '30 Hari Terakhir',
+            'all_time' => 'Semua Waktu',
+            default => 'Periode yang Dipilih',
+        };
     }
 
     private function logFailure(
